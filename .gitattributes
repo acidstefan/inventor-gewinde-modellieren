@@ -1,0 +1,2 @@
+# VBA-Module unverändert lassen (Windows-1252, CRLF), damit der Import in Inventor funktioniert
+*.bas -text

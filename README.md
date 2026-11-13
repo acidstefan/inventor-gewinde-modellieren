@@ -1,0 +1,79 @@
+# Inventor: Gewinde modellieren
+
+VBA-Makro für **Autodesk Inventor 2016**, das kosmetische Gewinde per Tastenkürzel als echtes 3D-Gewinde in den Körper schneidet.
+
+## Funktion
+
+Inventor zeigt Gewinde aus dem Befehl *Gewinde* und aus *Bohrung* mit Gewinde nur als Bild auf der Fläche. Das Makro liest die Gewindedaten aus und schneidet das Gewinde als Spirale in den Körper.
+
+- **Gelesen werden:** Bezeichnung, Steigung, Durchmesser, Innen-/Außengewinde, Rechts-/Linksgewinde, Gewindelänge bzw. volle Länge, Versatz.
+- **Erzeugt wird je Gewindefläche:** Arbeitsebene, Profilskizze, Arbeitsachse (ausgeblendet) und eine Spirale *Gewinde &lt;Bezeichnung&gt;* (Schneiden).
+- **Das kosmetische Gewinde bleibt erhalten.** Bohrungstabellen und Gewindedarstellung in der Zeichnung funktionieren weiter.
+- **Bereits modellierte Gewinde** werden beim nächsten Aufruf übersprungen. Wird die Spirale gelöscht, modelliert das Makro das Gewinde erneut.
+- **Rückgängig:** Ein einziges Strg+Z entfernt alles, was ein Aufruf erzeugt hat.
+
+| Gewindeart | Norm | Profil |
+| --- | --- | --- |
+| Metrisch ISO, Regel- und Feingewinde (M) | DIN 13 | 60° |
+| Rohrgewinde zylindrisch (G, Rp) | ISO 228-1, EN 10226-1 | 55° Whitworth |
+| Rohrgewinde kegelig (R außen, Rc innen) | ISO 7-1, EN 10226-2 | 55°, Kegel 1:16 |
+| Andere Gewinde, z. B. UNC | – | angenähert mit 60° |
+| NPT / NPS | – | nicht unterstützt |
+
+Modellierte Gewinde machen das Bauteil deutlich langsamer. Nutze sie nur, wo sie gebraucht werden, z. B. für 3D-Druck, STEP-Export oder FEM.
+
+## Installation
+
+Die Einrichtung dauert etwa 2 Minuten und ist nur einmal nötig.
+
+1. Datei [`src/modGewindeModellieren.bas`](src/modGewindeModellieren.bas) herunterladen (*Download raw file*).
+2. In Inventor **Alt+F11** drücken. Der VBA-Editor öffnet sich. Passiert nichts, ist VBA nicht installiert und muss nachinstalliert werden.
+3. Links im Projekt-Explorer mit rechts auf **ApplicationProject (Default.ivb)** klicken, dann **Datei importieren…** wählen und die .bas-Datei auswählen. Nur in der Default.ivb steht das Makro in allen Dokumenten zur Verfügung.
+4. Speichern (Strg+S) und den VBA-Editor schließen.
+5. **Tastenkürzel:** *Extras → Anpassen → Registerkarte Tastatur*. Kategorie **Makros** wählen, den Eintrag *GewindeModellieren* suchen, in der Spalte *Tasten* das Kürzel drücken (z. B. Strg+Alt+G) und mit OK bestätigen.
+6. Optional: Unter *Anpassen → Multifunktionsleiste* das Makro zusätzlich als Schaltfläche hinzufügen.
+
+**Update auf eine neue Version:** Im VBA-Editor das Modul *modGewindeModellieren* entfernen (Rechtsklick → Entfernen, nicht exportieren), dann die neue Datei importieren. Das Tastenkürzel bleibt erhalten.
+
+## Bedienung
+
+Bauteil (.ipt) öffnen oder in der Baugruppe bearbeiten, dann das Tastenkürzel drücken.
+
+- **Ohne Auswahl:** Alle Gewinde-Features und Gewindebohrungen des Bauteils werden modelliert, die noch nicht modelliert sind.
+- **Mit Auswahl:** Vorher Gewinde- oder Bohrungs-Features im Browser oder Gewindeflächen im Grafikfenster markieren. Dann werden nur diese modelliert.
+- **Ergebnis:** In der Statusleiste steht die Anzahl der modellierten Gewinde. Eine Meldung erscheint nur bei Hinweisen oder Fehlern.
+- **Darstellung:** Bei feinen Gewinden wirkt die Grafik oft grob oder fehlerhaft. Dann *Ansicht → Darstellung → Grafik verfeinern* wählen, bevor du das Ergebnis beurteilst.
+
+## Einstellungen und Fehlersuche
+
+Die Einstellungen stehen oben im Modul als Konstanten (Alt+F11, Modul *modGewindeModellieren*).
+
+| Konstante | Standard | Wirkung bei True |
+| --- | --- | --- |
+| `INVERT_ROTATION` | False | Rechts- und Linksgewinde werden vertauscht |
+| `INVERT_TAPER` | False | Kegelrichtung bei R/Rc wird umgekehrt (falls das Gewinde zum Ende hin dicker statt dünner wird) |
+| `SHOW_DEBUG` | False | Nach jedem Gewinde erscheint eine Meldung mit den ermittelten Werten |
+
+**Diagnose:** Für jedes Gewinde schreibt das Makro eine Zeile in das Direktfenster des VBA-Editors (Alt+F11, dann Strg+G). Die Zeile enthält Bezeichnung, Steigung, Durchmesser, Flächendurchmesser, Start, Richtung und Länge.
+
+| Meldung | Ursache / Abhilfe |
+| --- | --- |
+| Keine Gewinde gefunden | Bauteil enthält keine Gewinde-Features oder Bohrungen mit Gewinde |
+| Flächendurchmesser … passt nicht zu … | Bohrung bzw. Bolzen hat einen Durchmesser, der nicht zur Gewindegröße passt |
+| Spirale konnte nicht erzeugt werden | Geometrie verhindert den Schnitt; Diagnosezeile prüfen |
+| Rohrgewindegröße unbekannt | Größe nicht in der ISO-Tabelle (1/16" bis 6") |
+| NPT/NPS-Gewinde wird nicht unterstützt | US-Rohrgewinde, wird übersprungen |
+
+**Gewindeanfang bei Teillängen:** Das Makro beginnt am offenen Ende der Fläche, also an der freien Stirnseite oder Fase. Bei Durchgangsbohrungen, die an beiden Enden offen sind, kann es das andere Ende wählen.
+
+## Dateien
+
+| Datei | Inhalt |
+| --- | --- |
+| [`src/modGewindeModellieren.bas`](src/modGewindeModellieren.bas) | VBA-Modul zum Import in Inventor |
+| [`docs/Anleitung.wiki`](docs/Anleitung.wiki) | Diese Anleitung als MediaWiki-Code |
+| [`CHANGELOG.md`](CHANGELOG.md) | Änderungen je Version |
+
+## Lizenz
+
+[MIT](LICENSE). Nutzung auf eigene Verantwortung. Modellierte Gewinde vor der Fertigung prüfen.
