@@ -9,6 +9,7 @@ Inventor zeigt Gewinde aus dem Befehl *Gewinde* und aus *Bohrung* mit Gewinde nu
 - **Gelesen werden:** Bezeichnung, Steigung, Durchmesser, Innen-/Außengewinde, Rechts-/Linksgewinde, Gewindelänge bzw. volle Länge, Versatz.
 - **Erzeugt wird je Gewindefläche:** Arbeitsebene, Profilskizze, Arbeitsachse (ausgeblendet) und eine Spirale *Gewinde &lt;Bezeichnung&gt;* (Schneiden).
 - **Das kosmetische Gewinde bleibt erhalten.** Bohrungstabellen und Gewindedarstellung in der Zeichnung funktionieren weiter.
+- **Angeordnete Gewinde:** Rechteckige und runde Anordnungen von Gewindebohrungen oder Gewinden werden für die modellierten Gewinde nachgebildet. Anzahl, Abstand und Winkel sind mit den Parametern der Original-Anordnung verknüpft, Änderungen dort wirken also auch auf die Gewinde. Unterdrückte Elemente werden übernommen. Gespiegelte Gewinde werden direkt als Rechtsgewinde modelliert, weil eine gespiegelte Spirale ein Linksgewinde wäre.
 - **Bereits modellierte Gewinde** werden beim nächsten Aufruf übersprungen. Wird die Spirale gelöscht, modelliert das Makro das Gewinde erneut.
 - **Rückgängig:** Ein einziges Strg+Z entfernt alles, was ein Aufruf erzeugt hat.
 
@@ -40,7 +41,8 @@ Die Einrichtung dauert etwa 2 Minuten und ist nur einmal nötig.
 Bauteil (.ipt) öffnen oder in der Baugruppe bearbeiten, dann das Tastenkürzel drücken.
 
 - **Ohne Auswahl:** Alle Gewinde-Features und Gewindebohrungen des Bauteils werden modelliert, die noch nicht modelliert sind.
-- **Mit Auswahl:** Vorher Gewinde- oder Bohrungs-Features im Browser oder Gewindeflächen im Grafikfenster markieren. Dann werden nur diese modelliert.
+- **Mit Auswahl:** Vorher Gewinde- oder Bohrungs-Features, Anordnungen im Browser oder Gewindeflächen im Grafikfenster markieren. Dann werden nur diese modelliert. Bei einer gewählten Anordnung werden ihre Gewinde mitmodelliert.
+- **Anordnungen:** Werden bei jedem Aufruf mitgeprüft. Eine Anordnung, die nach dem ersten Aufruf neu dazukommt, wird beim nächsten Aufruf übernommen. Spätere Änderungen an Anzahl, Abstand oder Winkel übernimmt die Gewinde-Anordnung automatisch. Wird ein weiteres Feature in die Original-Anordnung aufgenommen, die Gewinde-Anordnung löschen und das Makro erneut aufrufen.
 - **Ergebnis:** In der Statusleiste steht die Anzahl der modellierten Gewinde. Eine Meldung erscheint nur bei Hinweisen oder Fehlern.
 - **Darstellung:** Bei feinen Gewinden wirkt die Grafik oft grob oder fehlerhaft. Dann *Ansicht → Darstellung → Grafik verfeinern* wählen, bevor du das Ergebnis beurteilst.
 
@@ -61,6 +63,7 @@ Die Einstellungen stehen oben im Modul als Konstanten (Alt+F11, Modul *modGewind
 | Keine Gewinde gefunden | Bauteil enthält keine Gewinde-Features oder Bohrungen mit Gewinde |
 | Flächendurchmesser … passt nicht zu … | Bohrung bzw. Bolzen hat einen Durchmesser, der nicht zur Gewindegröße passt |
 | Spirale konnte nicht erzeugt werden | Geometrie verhindert den Schnitt; Diagnosezeile prüfen |
+| Anordnung nicht übernommen / konnte nicht berechnet werden | Inventor konnte die Anordnung der Spiralen nicht erzeugen; Original-Anordnung prüfen |
 | Rohrgewindegröße unbekannt | Größe nicht in der ISO-Tabelle (1/16" bis 6") |
 | NPT/NPS-Gewinde wird nicht unterstützt | US-Rohrgewinde, wird übersprungen |
 

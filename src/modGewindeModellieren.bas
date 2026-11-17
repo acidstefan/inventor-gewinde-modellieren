@@ -17,6 +17,9 @@ Attribute VB_Name = "modGewindeModellieren"
 '
 ' Ergebnis je Gewindefläche: Arbeitsebene + Skizze (Profil) + Arbeitsachse +
 ' Spirale (Schneiden). Das kosmetische Gewinde bleibt erhalten (Zeichnung!).
+' Angeordnete Gewinde: rechteckige/runde Anordnungen werden für die Spiralen
+' nachgebildet und mit den Original-Parametern verknüpft; gespiegelte
+' Gewinde werden direkt (als Rechtsgewinde) modelliert.
 ' Alles in einer Transaktion -> ein Strg+Z macht alles rückgängig.
 ' Diagnose: je Gewinde eine Zeile im Direktfenster des VBA-Editors (Strg+G).
 '==============================================================================
@@ -101,15 +104,19 @@ Public Sub GewindeModellieren()
             ProcessFeature oDef, oFeat, nOk, sLog
         End If
     Next
+    ' Anordnungen (rechteckig, rund, Spiegeln) der Gewinde übernehmen
+    Dim nPat As Long
+    ProcessPatterns oDef, nOk, nPat, sLog
     ThisApplication.SilentOperation = bSilent
     oTrans.End
     oPart.Update
 
     Dim s As String
     s = nOk & " Gewinde modelliert"
+    If nPat > 0 Then s = s & ", " & nPat & " Anordnung(en) übernommen"
     If nSkip > 0 Then s = s & ", " & nSkip & " bereits vorhanden (übersprungen)"
     ThisApplication.StatusBarText = s
-    If Len(sLog) > 0 Or nOk = 0 Then
+    If Len(sLog) > 0 Or (nOk = 0 And nPat = 0) Then
         If Len(sLog) > 0 Then s = s & vbCrLf & vbCrLf & "Hinweise:" & vbCrLf & sLog
         MsgBox s, vbInformation, "Gewinde modellieren"
     End If
@@ -131,9 +138,45 @@ Private Sub CollectSelection(ByVal oDef As PartComponentDefinition, colFeat As C
         If TypeOf o Is FaceProxy Then Set o = o.NativeObject
         If TypeOf o Is Face Then Set o = FindFeatureForFace(oDef, o)
         If Not o Is Nothing Then
-            If TypeOf o Is ThreadFeature Or TypeOf o Is HoleFeature Then AddUnique colFeat, o
+            If TypeOf o Is ThreadFeature Or TypeOf o Is HoleFeature Then
+                AddUnique colFeat, o
+            ElseIf IsPattern(o) Then
+                AddBaseFeatures colFeat, o, 0     ' Anordnung gewählt -> deren Gewinde
+            End If
         End If
     Next
+End Sub
+
+Private Function IsPattern(ByVal o As Object) As Boolean
+    IsPattern = (TypeOf o Is RectangularPatternFeature) Or (TypeOf o Is CircularPatternFeature) _
+                Or (TypeOf o Is MirrorFeature)
+End Function
+
+' Gewinde-/Gewindebohrungs-Features, die (auch verschachtelt) in einer Anordnung stecken
+Private Sub AddBaseFeatures(colFeat As Collection, ByVal oPat As Object, ByVal nDepth As Long)
+    Dim p As Object
+    If nDepth > 10 Then Exit Sub
+    On Error Resume Next
+    For Each p In oPat.ParentFeatures
+        If TypeOf p Is ThreadFeature Then
+            AddUnique colFeat, p
+        ElseIf TypeOf p Is HoleFeature Then
+            If p.Tapped Then AddUnique colFeat, p
+        ElseIf IsPattern(p) Then
+            AddBaseFeatures colFeat, p, nDepth + 1
+        End If
+    Next
+End Sub
+
+' Quelle eines vom Makro erzeugten Features (Spirale oder Anordnung), sonst ""
+Private Function SourceOf(ByVal f As Object) As String
+    On Error Resume Next
+    If f.AttributeSets.NameIsUsed(ATTR_SET) Then SourceOf = f.AttributeSets.Item(ATTR_SET).Item("Quelle").Value
+End Function
+
+Private Sub MarkSource(ByVal f As Object, ByVal sSource As String)
+    On Error Resume Next
+    f.AttributeSets.Add(ATTR_SET).Add "Quelle", kStringType, sSource
 End Sub
 
 Private Function FindFeatureForFace(ByVal oDef As PartComponentDefinition, ByVal oFace As Face) As Object
@@ -165,11 +208,9 @@ Private Function IsAlreadyModeled(ByVal oDef As PartComponentDefinition, ByVal s
     Dim oC As CoilFeature
     On Error Resume Next
     For Each oC In oDef.Features.CoilFeatures
-        If oC.AttributeSets.NameIsUsed(ATTR_SET) Then
-            If oC.AttributeSets.Item(ATTR_SET).Item("Quelle").Value = sName Then
-                IsAlreadyModeled = True
-                Exit Function
-            End If
+        If SourceOf(oC) = sName Then
+            IsAlreadyModeled = True
+            Exit Function
         End If
     Next
 End Function
@@ -178,12 +219,33 @@ End Function
 ' Ein Feature (Gewinde oder Gewindebohrung) verarbeiten
 Private Sub ProcessFeature(ByVal oDef As PartComponentDefinition, ByVal oFeat As Object, _
                            ByRef nOk As Long, ByRef sLog As String)
-    Dim oInfo As Object, oX As Object, oF As Face
-    Dim colFaces As New Collection
-    Dim bFull As Boolean, bHaveFull As Boolean, bHole As Boolean
-    Dim dLen As Double, dOff As Double, rMin As Double
+    Dim oInfo As Object, colFaces As New Collection
+    Dim bFull As Boolean, bHole As Boolean, dLen As Double, dOff As Double
 
     On Error GoTo EH
+    If Not GetThreadParams(oFeat, colFaces, oInfo, bFull, dLen, dOff, bHole) Then Exit Sub
+
+    Dim oFace As Object, oCoil As CoilFeature, sMsg As String
+    For Each oFace In colFaces
+        sMsg = ""
+        Set oCoil = ModelThread(oDef, oFace, oInfo, bFull, dLen, dOff, bHole, oFeat.Name, sMsg)
+        If oCoil Is Nothing Then
+            sLog = sLog & oFeat.Name & ": " & sMsg & vbCrLf
+        Else
+            nOk = nOk + 1
+            MarkSource oCoil, oFeat.Name
+        End If
+    Next
+    Exit Sub
+
+EH:
+    sLog = sLog & oFeat.Name & ": Fehler - " & Err.Description & vbCrLf
+End Sub
+
+' Gewindedaten und Gewindeflächen eines Gewinde- oder Bohrungs-Features
+Private Function GetThreadParams(ByVal oFeat As Object, colFaces As Collection, ByRef oInfo As Object, _
+        ByRef bFull As Boolean, ByRef dLen As Double, ByRef dOff As Double, ByRef bHole As Boolean) As Boolean
+    Dim oX As Object, oF As Face, rMin As Double, bHaveFull As Boolean
 
     If TypeOf oFeat Is ThreadFeature Then
         Set oInfo = oFeat.ThreadInfo
@@ -201,7 +263,7 @@ Private Sub ProcessFeature(ByVal oDef As PartComponentDefinition, ByVal oFeat As
 
     ElseIf TypeOf oFeat Is HoleFeature Then
         bHole = True
-        If Not oFeat.Tapped Then Exit Sub
+        If Not oFeat.Tapped Then Exit Function
         Set oInfo = oFeat.TapInfo
         bHaveFull = TryGetBool(oInfo, "FullTapDepth", bFull)
         TryGetDouble oInfo, "ThreadDepth", dLen
@@ -226,26 +288,221 @@ Private Sub ProcessFeature(ByVal oDef As PartComponentDefinition, ByVal oFeat As
             Next
         End If
     Else
-        Exit Sub
+        Exit Function
     End If
 
     If Not bHaveFull Then bFull = (dLen <= TOL)
+    GetThreadParams = (colFaces.Count > 0)
+End Function
 
-    Dim oFace As Object, oCoil As CoilFeature, sMsg As String
-    For Each oFace In colFaces
-        sMsg = ""
-        Set oCoil = ModelThread(oDef, oFace, oInfo, bFull, dLen, dOff, bHole, oFeat.Name, sMsg)
-        If oCoil Is Nothing Then
-            sLog = sLog & oFeat.Name & ": " & sMsg & vbCrLf
+'------------------------------------------------------------------------------
+' Anordnungen übernehmen
+'  - Rechteckige / runde Anordnung: gleiche Anordnung der Spiralen erzeugen,
+'    Anzahl, Abstand und Winkel mit den Parametern der Original-Anordnung
+'    verknüpft (Änderungen dort wirken auch auf die Gewinde).
+'  - Spiegeln: gespiegelte Spiralen wären Linksgewinde, daher werden die
+'    gespiegelten Gewindeflächen direkt modelliert (Rechtsgewinde bleibt).
+'  - Verschachtelte Anordnungen (Anordnung einer Anordnung) werden in
+'    Browser-Reihenfolge abgearbeitet.
+Private Sub ProcessPatterns(ByVal oDef As PartComponentDefinition, ByRef nOk As Long, _
+                            ByRef nPat As Long, ByRef sLog As String)
+    Dim dict As Object, f As Object, sQ As String, colPat As New Collection
+    Set dict = CreateObject("Scripting.Dictionary")
+
+    ' vom Makro erzeugte Features je Quelle, und Original-Anordnungen sammeln
+    For Each f In oDef.Features
+        sQ = SourceOf(f)
+        If sQ <> "" Then
+            If Not dict.Exists(sQ) Then dict.Add sQ, New Collection
+            dict(sQ).Add f
+        ElseIf IsPattern(f) Then
+            If Not f.Suppressed Then colPat.Add f
+        End If
+    Next
+
+    Dim oPat As Object
+    For Each oPat In colPat
+        If Not dict.Exists(oPat.Name) Then
+            If TypeOf oPat Is MirrorFeature Then
+                ModelMirror oDef, oPat, dict, nOk, sLog
+            Else
+                CopyPattern oDef, oPat, dict, nPat, sLog
+            End If
+        End If
+    Next
+End Sub
+
+Private Sub CopyPattern(ByVal oDef As PartComponentDefinition, ByVal oPat As Object, ByVal dict As Object, _
+                        ByRef nPat As Long, ByRef sLog As String)
+    Dim oParents As ObjectCollection, p As Object, x As Object
+    Set oParents = ThisApplication.TransientObjects.CreateObjectCollection
+    For Each p In oPat.ParentFeatures
+        If dict.Exists(p.Name) Then
+            For Each x In dict(p.Name)
+                oParents.Add x
+            Next
+        End If
+    Next
+    If oParents.Count = 0 Then Exit Sub        ' Anordnung enthält keine Gewinde
+
+    Dim oNew As Object
+    Dim v1 As Variant, v2 As Variant, v3 As Variant, v4 As Variant, v5 As Variant, v6 As Variant
+    Dim v7 As Variant, v8 As Variant, v9 As Variant, v10 As Variant, v11 As Variant, v12 As Variant
+    Dim vComp As Variant, vOrient As Variant
+
+    On Error GoTo EH
+    ArgVal oPat, "ComputeType", vComp
+
+    If TypeOf oPat Is RectangularPatternFeature Then
+        ArgObj oPat, "XDirectionEntity", v1
+        ArgVal oPat, "NaturalXDirection", v2: If IsMissing(v2) Then v2 = True
+        ArgParam oPat, "XCount", v3
+        ArgParam oPat, "XSpacing", v4
+        ArgVal oPat, "XSpacingType", v5
+        If IsMissing(v5) Then ArgVal oPat, "XDirectionSpacingType", v5
+        ArgObj oPat, "XDirectionStartPoint", v6
+        ArgObj oPat, "YDirectionEntity", v7
+        If IsMissing(v7) Then
+            v8 = GetMissing(): v9 = GetMissing(): v10 = GetMissing(): v11 = GetMissing(): v12 = GetMissing()
         Else
-            nOk = nOk + 1
-            oCoil.AttributeSets.Add(ATTR_SET).Add "Quelle", kStringType, oFeat.Name
+            ArgVal oPat, "NaturalYDirection", v8: If IsMissing(v8) Then v8 = True
+            ArgParam oPat, "YCount", v9
+            ArgParam oPat, "YSpacing", v10
+            ArgVal oPat, "YSpacingType", v11
+            If IsMissing(v11) Then ArgVal oPat, "YDirectionSpacingType", v11
+            ArgObj oPat, "YDirectionStartPoint", v12
+        End If
+        ArgVal oPat, "OrientationMethod", vOrient
+        Set oNew = oDef.Features.RectangularPatternFeatures.Add(oParents, v1, v2, v3, v4, v5, v6, _
+                       v7, v8, v9, v10, v11, v12, vComp, vOrient)
+
+    ElseIf TypeOf oPat Is CircularPatternFeature Then
+        ArgObj oPat, "AxisEntity", v1
+        ArgVal oPat, "NaturalAxisDirection", v2: If IsMissing(v2) Then v2 = True
+        ArgParam oPat, "Count", v3
+        ArgParam oPat, "Angle", v4
+        ArgVal oPat, "FitWithinAngle", v5
+        Set oNew = oDef.Features.CircularPatternFeatures.Add(oParents, v1, v2, v3, v4, v5, vComp)
+    Else
+        Exit Sub
+    End If
+
+    If oNew.HealthStatus <> kUpToDateHealth Then
+        oNew.Delete True, True, True
+        sLog = sLog & oPat.Name & ": Anordnung der Gewinde konnte nicht berechnet werden" & vbCrLf
+        Exit Sub
+    End If
+
+    ' unterdrückte Elemente der Original-Anordnung ebenfalls unterdrücken
+    Dim i As Long
+    On Error Resume Next
+    For i = 2 To oPat.PatternElements.Count
+        If oPat.PatternElements.Item(i).Suppressed Then oNew.PatternElements.Item(i).Suppressed = True
+    Next
+    SafeName oNew, "Gewinde " & oPat.Name
+    On Error GoTo EH
+
+    MarkSource oNew, oPat.Name
+    If Not dict.Exists(oPat.Name) Then dict.Add oPat.Name, New Collection
+    dict(oPat.Name).Add oNew
+    nPat = nPat + 1
+    Exit Sub
+
+EH:
+    sLog = sLog & oPat.Name & ": Anordnung nicht übernommen - " & Err.Description & vbCrLf
+    On Error Resume Next
+    If Not oNew Is Nothing Then oNew.Delete True, True, True
+End Sub
+
+' Spiegeln: gespiegelte Gewindeflächen direkt als Rechtsgewinde modellieren
+Private Sub ModelMirror(ByVal oDef As PartComponentDefinition, ByVal oMir As Object, ByVal dict As Object, _
+                        ByRef nOk As Long, ByRef sLog As String)
+    Dim colBase As New Collection
+    AddBaseFeatures colBase, oMir, 0
+    If colBase.Count = 0 Then Exit Sub
+
+    Dim oFace As Face, oBase As Object, oBF As Object, oCoil As CoilFeature, sMsg As String
+    Dim colBF As Collection, oInfo As Object
+    Dim bFull As Boolean, bHole As Boolean, dLen As Double, dOff As Double, bDone As Boolean
+
+    On Error GoTo EH
+    For Each oFace In oMir.Faces
+        If oFace.SurfaceType = kCylinderSurface Or oFace.SurfaceType = kConeSurface Then
+            bDone = False
+            For Each oBase In colBase
+                Set colBF = New Collection
+                Set oInfo = Nothing
+                If GetThreadParams(oBase, colBF, oInfo, bFull, dLen, dOff, bHole) Then
+                    For Each oBF In colBF
+                        If SameThreadFace(oFace, oBF) Then
+                            sMsg = ""
+                            Set oCoil = ModelThread(oDef, oFace, oInfo, bFull, dLen, dOff, bHole, oMir.Name, sMsg)
+                            If oCoil Is Nothing Then
+                                sLog = sLog & oMir.Name & ": " & sMsg & vbCrLf
+                            Else
+                                nOk = nOk + 1
+                                MarkSource oCoil, oMir.Name
+                                If Not dict.Exists(oMir.Name) Then dict.Add oMir.Name, New Collection
+                                dict(oMir.Name).Add oCoil
+                            End If
+                            bDone = True
+                            Exit For
+                        End If
+                    Next
+                End If
+                If bDone Then Exit For
+            Next
         End If
     Next
     Exit Sub
 
 EH:
-    sLog = sLog & oFeat.Name & ": Fehler - " & Err.Description & vbCrLf
+    sLog = sLog & oMir.Name & ": Fehler - " & Err.Description & vbCrLf
+End Sub
+
+' Gleiche Gewindefläche (gleicher Typ und Radius bzw. Kegelwinkel)?
+Private Function SameThreadFace(ByVal f1 As Face, ByVal f2 As Face) As Boolean
+    If f1.SurfaceType <> f2.SurfaceType Then Exit Function
+    If f1.SurfaceType = kCylinderSurface Then
+        SameThreadFace = Abs(f1.Geometry.Radius - f2.Geometry.Radius) < TOL
+    ElseIf f1.SurfaceType = kConeSurface Then
+        SameThreadFace = Abs(Abs(f1.Geometry.HalfAngle) - Abs(f2.Geometry.HalfAngle)) < 0.001 _
+                         And Abs(f1.Geometry.HalfAngle) < 0.1
+    End If
+End Function
+
+' --- Argumente für die Anordnungs-Befehle aus der Original-Anordnung ---
+Private Function GetMissing(Optional v As Variant) As Variant
+    GetMissing = v                         ' liefert "Missing" = optionales Argument weglassen
+End Function
+
+Private Sub ArgObj(ByVal obj As Object, ByVal sProp As String, ByRef v As Variant)
+    Dim o As Object
+    On Error Resume Next
+    Set o = CallByName(obj, sProp, VbGet)
+    On Error GoTo 0
+    If o Is Nothing Then v = GetMissing() Else Set v = o
+End Sub
+
+Private Sub ArgVal(ByVal obj As Object, ByVal sProp As String, ByRef v As Variant)
+    Dim x As Variant
+    On Error Resume Next
+    x = CallByName(obj, sProp, VbGet)
+    If Err.Number <> 0 Then v = GetMissing() Else v = x
+End Sub
+
+' Parameter -> Name als Ausdruck, damit die neue Anordnung mit dem Original verknüpft ist
+Private Sub ArgParam(ByVal obj As Object, ByVal sProp As String, ByRef v As Variant)
+    Dim o As Object, x As Variant
+    On Error Resume Next
+    Set o = CallByName(obj, sProp, VbGet)
+    If Err.Number = 0 And Not o Is Nothing Then
+        v = o.Name
+        If Err.Number = 0 Then Exit Sub
+    End If
+    Err.Clear
+    x = CallByName(obj, sProp, VbGet)
+    If Err.Number <> 0 Then v = GetMissing() Else v = x
 End Sub
 
 '------------------------------------------------------------------------------
