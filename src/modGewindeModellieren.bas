@@ -88,6 +88,19 @@ Public Sub GewindeModellieren()
         Exit Sub
     End If
 
+    ' ---- Spiralen aus Version 2.0/2.1 (Quelle unlesbar) -> erst löschen lassen ----
+    Dim oOld As CoilFeature, sOld As String
+    For Each oOld In oDef.Features.CoilFeatures
+        If IsOldMarked(oOld) And SourceOf(oOld) = "" Then sOld = sOld & "  " & oOld.Name & vbCrLf
+    Next
+    If Len(sOld) > 0 Then
+        MsgBox "Dieses Bauteil enthält modellierte Gewinde aus einer älteren Makro-Version:" & vbCrLf & _
+               sOld & vbCrLf & "Bitte diese Spiralen (samt Skizze, Arbeitsebene und -achse) löschen " & _
+               "und das Makro erneut aufrufen. Sonst würden sie doppelt erzeugt.", _
+               vbExclamation, "Gewinde modellieren"
+        Exit Sub
+    End If
+
     ' ---- modellieren ----
     Dim oTrans As Transaction
     Set oTrans = ThisApplication.TransactionManager.StartTransaction(oPart, "Gewinde modellieren")
@@ -169,15 +182,44 @@ Private Sub AddBaseFeatures(colFeat As Collection, ByVal oPat As Object, ByVal n
 End Sub
 
 ' Quelle eines vom Makro erzeugten Features (Spirale oder Anordnung), sonst ""
+' Die Quelle steckt hex-codiert im NAMEN eines Attributsatzes ("MG_0042006F..."),
+' weil Inventor 2016 den Attributwert nicht zuverlässig zurückliefert.
 Private Function SourceOf(ByVal f As Object) As String
+    Dim oAS As Object
     On Error Resume Next
-    If f.AttributeSets.NameIsUsed(ATTR_SET) Then SourceOf = f.AttributeSets.Item(ATTR_SET).Item("Quelle").Value
+    For Each oAS In f.AttributeSets
+        If Left$(oAS.Name, 3) = "MG_" Then
+            SourceOf = HexDecode(Mid$(oAS.Name, 4))
+            Exit Function
+        End If
+    Next
+End Function
+
+' Altes Format (Version 2.0/2.1) vorhanden? -> vom Makro erzeugt, Quelle aber unlesbar
+Private Function IsOldMarked(ByVal f As Object) As Boolean
+    On Error Resume Next
+    IsOldMarked = f.AttributeSets.NameIsUsed(ATTR_SET)
 End Function
 
 Private Sub MarkSource(ByVal f As Object, ByVal sSource As String)
     On Error Resume Next
-    f.AttributeSets.Add(ATTR_SET).Add "Quelle", kStringType, sSource
+    f.AttributeSets.Add "MG_" & HexEncode(sSource)
 End Sub
+
+Private Function HexEncode(ByVal s As String) As String
+    Dim i As Long
+    For i = 1 To Len(s)
+        HexEncode = HexEncode & Right$("000" & Hex$(AscW(Mid$(s, i, 1)) And &HFFFF&), 4)
+    Next
+End Function
+
+Private Function HexDecode(ByVal s As String) As String
+    Dim i As Long
+    On Error Resume Next
+    For i = 1 To Len(s) - 3 Step 4
+        HexDecode = HexDecode & ChrW$(CLng("&H" & Mid$(s, i, 4)))
+    Next
+End Function
 
 Private Function FindFeatureForFace(ByVal oDef As PartComponentDefinition, ByVal oFace As Face) As Object
     Dim oTF As ThreadFeature, oX As Object, oF As Face
@@ -308,32 +350,90 @@ Private Sub ProcessPatterns(ByVal oDef As PartComponentDefinition, ByRef nOk As 
                             ByRef nPat As Long, ByRef sLog As String)
     Dim dict As Object, f As Object, sQ As String, colPat As New Collection
     Set dict = CreateObject("Scripting.Dictionary")
+    On Error Resume Next
 
-    ' vom Makro erzeugte Features je Quelle, und Original-Anordnungen sammeln
-    For Each f In oDef.Features
-        sQ = SourceOf(f)
-        If sQ <> "" Then
-            If Not dict.Exists(sQ) Then dict.Add sQ, New Collection
-            dict(sQ).Add f
-        ElseIf IsPattern(f) Then
-            If Not f.Suppressed Then colPat.Add f
-        End If
+    ' vom Makro erzeugte Spiralen und Anordnungen je Quelle
+    For Each f In oDef.Features.CoilFeatures
+        RegisterSource dict, f
+    Next
+    For Each f In oDef.Features.RectangularPatternFeatures
+        If SourceOf(f) <> "" Then RegisterSource dict, f Else colPat.Add f
+    Next
+    For Each f In oDef.Features.CircularPatternFeatures
+        If SourceOf(f) <> "" Then RegisterSource dict, f Else colPat.Add f
+    Next
+    For Each f In oDef.Features.MirrorFeatures
+        colPat.Add f
+    Next
+    On Error GoTo 0
+    Dim vK As Variant, p As Object, sPar As String
+    Debug.Print "Anordnungen gefunden: " & colPat.Count & ", Gewinde-Quellen: " & dict.Count
+    For Each vK In dict.Keys
+        Debug.Print "  Quelle [" & vK & "]: " & dict(vK).Count & " Feature(s)"
+    Next
+    For Each f In colPat
+        sPar = ""
+        On Error Resume Next
+        For Each p In f.ParentFeatures
+            sPar = sPar & "[" & p.Name & "|" & TypeName(p) & "|" & IIf(dict.Exists(p.Name), "Gewinde", "-") & "] "
+        Next
+        If Err.Number <> 0 Then sPar = sPar & "(Fehler ParentFeatures: " & Err.Description & ")"
+        On Error GoTo 0
+        Debug.Print "  Anordnung [" & f.Name & "|" & TypeName(f) & "] Eltern: " & sPar
     Next
 
-    Dim oPat As Object
-    For Each oPat In colPat
-        If Not dict.Exists(oPat.Name) Then
-            If TypeOf oPat Is MirrorFeature Then
-                ModelMirror oDef, oPat, dict, nOk, sLog
-            Else
-                CopyPattern oDef, oPat, dict, nPat, sLog
+    ' mehrere Durchläufe, damit verschachtelte Anordnungen ihre Eltern vorfinden
+    Dim oPat As Object, nPass As Long, bProgress As Boolean, sState As String
+    For nPass = 1 To 5
+        bProgress = False
+        For Each oPat In colPat
+            If Not dict.Exists(oPat.Name) And Not oPat.Suppressed Then
+                If HasThreadParents(oPat, dict) Then
+                    sState = ""
+                    If TypeOf oPat Is MirrorFeature Then
+                        sState = "Spiegeln -> Einzelgewinde"
+                        ModelDirect oDef, oPat, dict, nOk, sLog
+                    ElseIf CopyPattern(oDef, oPat, dict, sState) Then
+                        nPat = nPat + 1
+                    Else
+                        ' Anordnung ließ sich nicht nachbilden -> Gewinde einzeln modellieren
+                        sLog = sLog & oPat.Name & ": Anordnung nicht verknüpfbar (" & sState & _
+                               "), Gewinde einzeln modelliert" & vbCrLf
+                        ModelDirect oDef, oPat, dict, nOk, sLog
+                    End If
+                    Debug.Print "Anordnung " & oPat.Name & " (" & TypeName(oPat) & "): " & _
+                                IIf(sState = "", "verknüpft übernommen", sState)
+                    If Not dict.Exists(oPat.Name) Then dict.Add oPat.Name, New Collection
+                    bProgress = True
+                End If
             End If
-        End If
+        Next
+        If Not bProgress Then Exit For
     Next
 End Sub
 
-Private Sub CopyPattern(ByVal oDef As PartComponentDefinition, ByVal oPat As Object, ByVal dict As Object, _
-                        ByRef nPat As Long, ByRef sLog As String)
+Private Sub RegisterSource(ByVal dict As Object, ByVal f As Object)
+    Dim sQ As String
+    sQ = SourceOf(f)
+    If sQ = "" Then Exit Sub
+    If Not dict.Exists(sQ) Then dict.Add sQ, New Collection
+    dict(sQ).Add f
+End Sub
+
+' Enthält die Anordnung (direkt) ein Feature, zu dem es modellierte Gewinde gibt?
+Private Function HasThreadParents(ByVal oPat As Object, ByVal dict As Object) As Boolean
+    Dim p As Object
+    On Error Resume Next
+    For Each p In oPat.ParentFeatures
+        If dict.Exists(p.Name) Then
+            If dict(p.Name).Count > 0 Then HasThreadParents = True: Exit Function
+        End If
+    Next
+End Function
+
+' Rechteckige/runde Anordnung für die Gewinde nachbilden (verknüpft). sState = Fehlertext
+Private Function CopyPattern(ByVal oDef As PartComponentDefinition, ByVal oPat As Object, _
+                             ByVal dict As Object, ByRef sState As String) As Boolean
     Dim oParents As ObjectCollection, p As Object, x As Object
     Set oParents = ThisApplication.TransientObjects.CreateObjectCollection
     For Each p In oPat.ParentFeatures
@@ -343,7 +443,7 @@ Private Sub CopyPattern(ByVal oDef As PartComponentDefinition, ByVal oPat As Obj
             Next
         End If
     Next
-    If oParents.Count = 0 Then Exit Sub        ' Anordnung enthält keine Gewinde
+    If oParents.Count = 0 Then sState = "keine Gewinde": Exit Function
 
     Dim oNew As Object
     Dim v1 As Variant, v2 As Variant, v3 As Variant, v4 As Variant, v5 As Variant, v6 As Variant
@@ -355,6 +455,7 @@ Private Sub CopyPattern(ByVal oDef As PartComponentDefinition, ByVal oPat As Obj
 
     If TypeOf oPat Is RectangularPatternFeature Then
         ArgObj oPat, "XDirectionEntity", v1
+        If IsMissing(v1) Then sState = "Richtung 1 nicht lesbar": Exit Function
         ArgVal oPat, "NaturalXDirection", v2: If IsMissing(v2) Then v2 = True
         ArgParam oPat, "XCount", v3
         ArgParam oPat, "XSpacing", v4
@@ -373,25 +474,29 @@ Private Sub CopyPattern(ByVal oDef As PartComponentDefinition, ByVal oPat As Obj
             ArgObj oPat, "YDirectionStartPoint", v12
         End If
         ArgVal oPat, "OrientationMethod", vOrient
+        Debug.Print "  Rechteckig: X=" & ArgText(v3) & " x " & ArgText(v4) & "  Y=" & ArgText(v9) & " x " & ArgText(v10)
         Set oNew = oDef.Features.RectangularPatternFeatures.Add(oParents, v1, v2, v3, v4, v5, v6, _
                        v7, v8, v9, v10, v11, v12, vComp, vOrient)
 
     ElseIf TypeOf oPat Is CircularPatternFeature Then
         ArgObj oPat, "AxisEntity", v1
+        If IsMissing(v1) Then sState = "Achse nicht lesbar": Exit Function
         ArgVal oPat, "NaturalAxisDirection", v2: If IsMissing(v2) Then v2 = True
         ArgParam oPat, "Count", v3
         ArgParam oPat, "Angle", v4
         ArgVal oPat, "FitWithinAngle", v5
+        Debug.Print "  Rund: Anzahl=" & ArgText(v3) & " Winkel=" & ArgText(v4)
         Set oNew = oDef.Features.CircularPatternFeatures.Add(oParents, v1, v2, v3, v4, v5, vComp)
     Else
-        Exit Sub
+        sState = "Typ nicht unterstützt": Exit Function
     End If
 
-    If oNew.HealthStatus <> kUpToDateHealth Then
-        oNew.Delete True, True, True
-        sLog = sLog & oPat.Name & ": Anordnung der Gewinde konnte nicht berechnet werden" & vbCrLf
-        Exit Sub
-    End If
+    Select Case oNew.HealthStatus
+        Case kCannotComputeHealth, kInErrorHealth, kDriverLostHealth
+            sState = "Inventor kann sie nicht berechnen"
+            oNew.Delete True, True, True
+            Exit Function
+    End Select
 
     ' unterdrückte Elemente der Original-Anordnung ebenfalls unterdrücken
     Dim i As Long
@@ -400,33 +505,39 @@ Private Sub CopyPattern(ByVal oDef As PartComponentDefinition, ByVal oPat As Obj
         If oPat.PatternElements.Item(i).Suppressed Then oNew.PatternElements.Item(i).Suppressed = True
     Next
     SafeName oNew, "Gewinde " & oPat.Name
-    On Error GoTo EH
-
     MarkSource oNew, oPat.Name
+    On Error GoTo 0
+
     If Not dict.Exists(oPat.Name) Then dict.Add oPat.Name, New Collection
     dict(oPat.Name).Add oNew
-    nPat = nPat + 1
-    Exit Sub
+    CopyPattern = True
+    Exit Function
 
 EH:
-    sLog = sLog & oPat.Name & ": Anordnung nicht übernommen - " & Err.Description & vbCrLf
+    sState = Err.Description
     On Error Resume Next
     If Not oNew Is Nothing Then oNew.Delete True, True, True
-End Sub
+End Function
 
-' Spiegeln: gespiegelte Gewindeflächen direkt als Rechtsgewinde modellieren
-Private Sub ModelMirror(ByVal oDef As PartComponentDefinition, ByVal oMir As Object, ByVal dict As Object, _
+Private Function ArgText(ByVal v As Variant) As String
+    On Error Resume Next
+    If IsMissing(v) Then ArgText = "-" Else ArgText = CStr(v)
+End Function
+
+' Gewindeflächen eines Features (Anordnung/Spiegeln) direkt modellieren.
+' Gespiegelt bleibt so ein Rechtsgewinde ein Rechtsgewinde.
+Private Sub ModelDirect(ByVal oDef As PartComponentDefinition, ByVal oPat As Object, ByVal dict As Object, _
                         ByRef nOk As Long, ByRef sLog As String)
     Dim colBase As New Collection
-    AddBaseFeatures colBase, oMir, 0
+    AddBaseFeatures colBase, oPat, 0
     If colBase.Count = 0 Then Exit Sub
 
     Dim oFace As Face, oBase As Object, oBF As Object, oCoil As CoilFeature, sMsg As String
-    Dim colBF As Collection, oInfo As Object
+    Dim colBF As Collection, oInfo As Object, nFaces As Long
     Dim bFull As Boolean, bHole As Boolean, dLen As Double, dOff As Double, bDone As Boolean
 
     On Error GoTo EH
-    For Each oFace In oMir.Faces
+    For Each oFace In oPat.Faces
         If oFace.SurfaceType = kCylinderSurface Or oFace.SurfaceType = kConeSurface Then
             bDone = False
             For Each oBase In colBase
@@ -435,15 +546,16 @@ Private Sub ModelMirror(ByVal oDef As PartComponentDefinition, ByVal oMir As Obj
                 If GetThreadParams(oBase, colBF, oInfo, bFull, dLen, dOff, bHole) Then
                     For Each oBF In colBF
                         If SameThreadFace(oFace, oBF) Then
+                            nFaces = nFaces + 1
                             sMsg = ""
-                            Set oCoil = ModelThread(oDef, oFace, oInfo, bFull, dLen, dOff, bHole, oMir.Name, sMsg)
+                            Set oCoil = ModelThread(oDef, oFace, oInfo, bFull, dLen, dOff, bHole, oPat.Name, sMsg)
                             If oCoil Is Nothing Then
-                                sLog = sLog & oMir.Name & ": " & sMsg & vbCrLf
+                                sLog = sLog & oPat.Name & ": " & sMsg & vbCrLf
                             Else
                                 nOk = nOk + 1
-                                MarkSource oCoil, oMir.Name
-                                If Not dict.Exists(oMir.Name) Then dict.Add oMir.Name, New Collection
-                                dict(oMir.Name).Add oCoil
+                                MarkSource oCoil, oPat.Name
+                                If Not dict.Exists(oPat.Name) Then dict.Add oPat.Name, New Collection
+                                dict(oPat.Name).Add oCoil
                             End If
                             bDone = True
                             Exit For
@@ -454,10 +566,12 @@ Private Sub ModelMirror(ByVal oDef As PartComponentDefinition, ByVal oMir As Obj
             Next
         End If
     Next
+    Debug.Print "  " & oPat.Name & ": " & nFaces & " Gewindeflächen gefunden"
+    If nFaces = 0 Then sLog = sLog & oPat.Name & ": keine Gewindeflächen in der Anordnung gefunden" & vbCrLf
     Exit Sub
 
 EH:
-    sLog = sLog & oMir.Name & ": Fehler - " & Err.Description & vbCrLf
+    sLog = sLog & oPat.Name & ": Fehler - " & Err.Description & vbCrLf
 End Sub
 
 ' Gleiche Gewindefläche (gleicher Typ und Radius bzw. Kegelwinkel)?
@@ -719,7 +833,12 @@ Private Function GetThreadSpec(ByVal oInfo As Object, ByVal R As Double, ByVal b
     Dim v As Double, bPipe As Boolean
 
     sDes = Trim$(TryGetString(oInfo, "ThreadDesignation"))
+    If sDes = "" Then sDes = Trim$(TryGetString(oInfo, "FullThreadDesignation"))
+    If sDes = "" Then sDes = Trim$(TryGetString(oInfo, "NominalSize"))
     sType = TryGetString(oInfo, "ThreadType")
+    Debug.Print "Gewindeinfo: " & TypeName(oInfo) & " | Typ='" & sType & "' | Bez='" & _
+        TryGetString(oInfo, "ThreadDesignation") & "' | Nenn='" & TryGetString(oInfo, "NominalSize") & _
+        "' | Klasse='" & TryGetString(oInfo, "Class") & "' | Pitch='" & TryGetString(oInfo, "Pitch") & "'"
     sAll = UCase$(sType & " " & sDes)
     sp.Taper = (TypeName(oInfo) = "TaperedThreadInfo")
     sp.Des = sDes
@@ -738,8 +857,25 @@ Private Function GetThreadSpec(ByVal oInfo As Object, ByVal R As Double, ByVal b
     If bPipe Then
         '---------------- ISO-Rohrgewinde (55° Whitworth) ----------------
         Dim dSize As Double, tpi As Double, dMajMM As Double, gaugeMM As Double
-        dSize = ParsePipeSize(sDes)
-        If Not PipeTable(dSize, tpi, dMajMM, gaugeMM) Then
+        Dim bFound As Boolean, dDiaMM As Double, dPmm As Double
+        ' Inventor-Schreibweise: "G47.803x2.309" = Außen-Ø x Steigung in mm
+        re.Pattern = "(\d+(?:[.,]\d+)?)\s*[xX]\s*(\d+(?:[.,]\d+)?)"
+        If re.Test(sDes) Then
+            Set m = re.Execute(sDes)(0)
+            dDiaMM = Val(Replace(m.SubMatches(0), ",", "."))
+            dPmm = Val(Replace(m.SubMatches(1), ",", "."))
+            If dDiaMM > 3 Then bFound = PipeTableByDia(dDiaMM, dSize, tpi, dMajMM, gaugeMM)
+        End If
+        ' Zoll-Schreibweise: "G 1 1/2", "Rp3/8", "1/2-14"
+        If Not bFound Then
+            dSize = ParsePipeSize(sDes)
+            bFound = PipeTable(dSize, tpi, dMajMM, gaugeMM)
+        End If
+        ' unbekannte Größe, aber Ø und Steigung angegeben -> direkt verwenden
+        If Not bFound And dDiaMM > 3 And dPmm > 0.1 And Not sp.Taper Then
+            dMajMM = dDiaMM: tpi = 25.4 / dPmm: gaugeMM = 0: bFound = True
+        End If
+        If Not bFound Then
             sMsg = "Rohrgewindegröße unbekannt (" & sDes & ")"
             Exit Function
         End If
@@ -761,7 +897,11 @@ Private Function GetThreadSpec(ByVal oInfo As Object, ByVal R As Double, ByVal b
         Else
             If bInternal Then sp.Kind = "G/Rp" Else sp.Kind = "G"
         End If
-        If sp.Des = "" Then sp.Des = sp.Kind & " " & PipeSizeText(dSize)
+        If dSize > 0 Then
+            sp.Des = sp.Kind & " " & PipeSizeText(dSize)     ' z. B. "G/Rp 1 1/2"
+        ElseIf sp.Des = "" Then
+            sp.Des = sp.Kind & " " & Format(dMajMM, "0.###")
+        End If
     Else
         '---------------- metrisch ISO (60°) ----------------
         Dim dPdes As Double, dPapi As Double
@@ -863,6 +1003,24 @@ Private Function PipeTable(ByVal dSize As Double, ByRef tpi As Double, ByRef dMa
             Exit Function
         End If
     Next
+End Function
+
+' Rohrgewinde über den Außendurchmesser [mm] in der Tabelle suchen
+Private Function PipeTableByDia(ByVal dDiaMM As Double, ByRef dSize As Double, ByRef tpi As Double, _
+                                ByRef dMaj As Double, ByRef gauge As Double) As Boolean
+    Dim vS As Variant, i As Long
+    vS = Array(0.0625, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1, 1.125, 1.25, 1.5, _
+               1.75, 2, 2.25, 2.5, 2.75, 3, 3.5, 4, 4.5, 5, 5.5, 6)
+    For i = LBound(vS) To UBound(vS)
+        If PipeTable(vS(i), tpi, dMaj, gauge) Then
+            If Abs(dMaj - dDiaMM) < 0.1 Then
+                dSize = vS(i)
+                PipeTableByDia = True
+                Exit Function
+            End If
+        End If
+    Next
+    tpi = 0: dMaj = 0: gauge = 0
 End Function
 
 ' ISO-Regelgewinde (DIN 13-1), Steigung in mm

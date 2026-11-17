@@ -42,6 +42,8 @@ Die Einrichtung dauert etwa 2 Minuten und ist nur einmal nötig.
 
 '''Update auf eine neue Version:''' Im VBA-Editor das Modul ''modGewindeModellieren'' entfernen (Rechtsklick → Entfernen, nicht exportieren), dann die neue Datei importieren. Das Tastenkürzel bleibt erhalten.
 
+'''Von Version 2.0 auf 2.1:''' Gewinde-Spiralen aus Version 2.0 kann das Makro keiner Bohrung mehr zuordnen. Findet es solche Spiralen, bricht es mit einem Hinweis ab. Dann die Spiralen samt Skizze, Arbeitsebene und -achse („Gewinde …“, „Gewindeprofil …“, „Gewindeebene …“, „Gewindeachse …“) löschen und das Makro erneut aufrufen.
+
 ==== Bedienung ====
 
 Bauteil (.ipt) öffnen oder in der Baugruppe bearbeiten, dann das Tastenkürzel drücken.
